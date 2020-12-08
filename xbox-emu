@@ -1,10 +1,44 @@
-#!/usr/bin/env python
+#!/usr/bin/python
 
 from __future__ import print_function
 
+import os
+import argparse
+
+import glob
 import evdev
 import sys
 import time
+import select
+
+
+CONFIG_PATH = f'{os.path.expanduser("~")}/.config/xbox-emu.cfg'
+
+
+def list_active_evdev():
+    '''Lists the next /dev/input/event* devices to generate input events.
+       Will usually only be a single device.'''
+
+    devices = []
+    for dev in glob.glob('/dev/input/event*'):
+        try:
+            devices.append(evdev.device.InputDevice(dev))
+        except (IOError, OSError):
+            # Don't have permissions for that device, ignore it.
+            pass
+    devices = {dev.fd: dev for dev in devices}
+
+    output = []
+    anyInput = False
+    while not anyInput:
+        # use select to wait for input
+        r, w, x = select.select(devices, [], [])
+        for fd in r:
+            for event in list(devices[fd].read())[:1]:
+                output.append(devices[fd].fn)
+                anyInput = True
+
+    return output
 
 
 # From http://stackoverflow.com/a/231216
@@ -14,43 +48,13 @@ class flushfile(object):
     def __init__(self, f):
         self.f = f
 
-    def __getattr__(self,name):
+    def __getattr__(self, name):
         return object.__getattribute__(self.f, name)
 
     def write(self, x):
         self.f.write(x)
         self.f.flush()
 
-# Flush after every write to stdout. Required because otherwise prints
-#   without newlines won't appear.
-sys.stdout = flushfile(sys.stdout)
-
-
-# Get the device either from the command line or by using identify_evdev
-if len(sys.argv) > 2 or len(sys.argv) == 2 and sys.argv[1] == '--help':
-    print("USAGE: %s [event-device]" % sys.argv[0], file=sys.stderr)
-    print(file=sys.stderr)
-    print("Generates a xboxdrv command for treating event-device as an XBox controller.", file=sys.stderr)
-    print("If event-device is omitted, the controller will be identified by asking the", file=sys.stderr)
-    print("user to press a button on it.", file=sys.stderr)
-    sys.exit()
-elif len(sys.argv) == 2:
-    evdev_filename = sys.argv[1]
-else:
-    from identify_evdev import list_active_evdev
-    fns = None
-    # Keep going until there's input from only one device.
-    while fns is None or len(fns) != 1:
-        print("Press any button on only the joystick you are setting up.")
-        fns = list_active_evdev()
-    evdev_filename = fns[0]
-    print("Selected event device: %s" % evdev_filename)
-    print("Stop pressing any buttons.")
-    # Give user time to stop pressing buttons.
-    time.sleep(2)
-
-# Open the device
-dev = evdev.device.InputDevice(evdev_filename)
 
 def convert_keycode_to_name(code):
     '''Convert a keycode number to a string xboxdrv understands.'''
@@ -72,6 +76,7 @@ def eat_events(dev):
     while dev.read_one() is not None:
         pass
 
+
 def get_next_pressed_button_name(dev):
     '''Wait for the next button press and report its xboxdrv name.'''
 
@@ -79,6 +84,7 @@ def get_next_pressed_button_name(dev):
         if event.type == evdev.ecodes.EV_KEY:
             if event.value == evdev.KeyEvent.key_down:
                 return convert_keycode_to_name(event.code)
+
 
 def get_next_maxed_axis(dev, mappings):
     '''Wait for any axis (joystick direction or analog button) to reach
@@ -101,6 +107,7 @@ def get_next_maxed_axis(dev, mappings):
                 return 'min', axis
             elif event.value == absinfo.max:
                 return 'max', axis
+
 
 def ask_user_for_keymap(dev):
     '''Generates a mapping for buttons by listing all of the XBox controller
@@ -134,7 +141,10 @@ def ask_user_for_keymap(dev):
         ('orange', 'guitar button'),
     ]
 
-    print("Press the corresponding button on your controller. If the button doesn't exist, or doesn't register, press the start button again to ignore it. It might act as an axis, we will register that later.")
+    print(
+        "Press the corresponding button on your controller. If the button doesn't exist, or doesn't register"
+        ", press the start button again to ignore it. It might act as an axis, we will register that later."
+    )
     # Dictionary of XBox buttons to xboxdrv key names.
     mappings = {}
     # Values of mappings dictionary to avoid mapping the same button twice.
@@ -157,6 +167,7 @@ def ask_user_for_keymap(dev):
 
     return mappings
 
+
 def get_evdev_keymap_for_mappings(mappings):
     '''Converts a mappings dictionary in the format of XBox button names
        mapped to xboxdrv key names of the key on the controller that should
@@ -165,6 +176,7 @@ def get_evdev_keymap_for_mappings(mappings):
 
     return ','.join(["%s=%s" % (mappings[button], button)
                      for button in mappings])
+
 
 def ask_user_for_axismap(dev, mappings):
     '''Generates a mapping for the axes by for each XBox axis, asking the
@@ -183,7 +195,10 @@ def ask_user_for_axismap(dev, mappings):
         ('dpad_y', ('up', 'down'), 'dpad (up/down)'),
     ]
 
-    print("Move the corresponding axis on your controller. If the axis doesn't exist, press the start button to ignore it.")
+    print(
+        "Move the corresponding axis on your controller."
+        "If the axis doesn't exist, press the start button to ignore it."
+    )
     axis_mapping = {}
     for axis, dirs, description in xbox_axis_names:
         # Is this an axis that can be moved in both directions (a joystick)?
@@ -193,10 +208,10 @@ def ask_user_for_axismap(dev, mappings):
             #   user to move the axis in both directions... of course,
             #   they might not move the same axis both times, so we need
             #   to check for that.
-            same_axis = False # Were both readings on the same axis?
+            same_axis = False  # Were both readings on the same axis?
             while not same_axis:
-                evaxis = None # Which axis has been used so far?
-                inverse = None # Is the axis
+                evaxis = None  # Which axis has been used so far?
+                inverse = None  # Is the axis
                 for d in dirs:
                     # Ignore events for half a second to give axes a chance
                     #   to reset.
@@ -269,11 +284,96 @@ def ask_user_for_axismap(dev, mappings):
                       for axis in axis_mapping
                       if axis_mapping[axis][1]]))
 
-# Ask the user for all of the mappings...
-mappings = ask_user_for_keymap(dev)
-evdev_keymap = get_evdev_keymap_for_mappings(mappings)
-evdev_absmap, axismap = ask_user_for_axismap(dev, mappings)
 
-# ... and print out the xboxdrv command for those mappings.
-print("xboxdrv --evdev \"%s\" --evdev-keymap \"%s\" --evdev-absmap \"%s\" --axismap \"%s\" --mimic-xpad --silent" \
-        % (evdev_filename, evdev_keymap, evdev_absmap, axismap))
+def detect_gamepad():
+    sys.stdout = flushfile(sys.stdout)
+
+    global dev
+    global evdev_filename
+
+    fns = None
+    # Keep going until there's input from only one device.
+    while fns is None or len(fns) != 1:
+        print("Press any button on only the joystick you are setting up.")
+        fns = list_active_evdev()
+    evdev_filename = fns[0]
+    print("Selected event device: %s" % evdev_filename)
+    print("Stop pressing any buttons.")
+    # Give user time to stop pressing buttons.
+    time.sleep(2)
+
+    dev = evdev.device.InputDevice(evdev_filename)
+
+
+def generate_command():
+    detect_gamepad()
+
+    mappings = ask_user_for_keymap(dev)
+    evdev_keymap = get_evdev_keymap_for_mappings(mappings)
+    evdev_absmap, axismap = ask_user_for_axismap(dev, mappings)
+
+    command = "xboxdrv --evdev \"{}\" --evdev-keymap \"%s\" --evdev-absmap \"%s\" --axismap \"%s\" --mimic-xpad --silent" \
+              % (evdev_keymap, evdev_absmap, axismap)
+
+    return command
+
+
+def save_command(command):
+    with open(CONFIG_PATH, 'w+') as f:
+        f.write(command)
+
+
+def get_command():
+    if not os.path.exists(CONFIG_PATH):
+        return
+
+    with open(CONFIG_PATH, 'r') as f:
+        return f.read()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description='All-in-one utility for configuring and emulating Xbox controller. '
+        'It stores the resulting (generated) xboxdrv command in ~/.config/xbox-emu.cfg',
+    )
+    parser.add_argument(
+        '--emulate',
+        action='store_true',
+        help='Run generated command that stores in '
+        '~/.config/xbox-emu.cfg. If you don\'t have one, it raises an error.\n\n'
+        'To make it work, run the --setup command at first',
+    )
+    parser.add_argument(
+        '--setup',
+        action='store_true',
+        help='Run interactive setup for Xbox controller emulation. It saves '
+        'the genereated xboxdrv command in ~/.config/xbox-emu.cfg file',
+    )
+    parser.add_argument(
+        '--identify',
+        action='store_true',
+        help='Identify the name of /dev/input/event* after pressing any button on the gamepad',
+    )
+
+    args = vars(parser.parse_args())
+
+    if list(args.values()).count(True) != 1:
+        print('You should specify one and only one option! Type --help for more')
+        exit
+
+    if args.get('identify'):
+        detect_gamepad()
+
+    if args.get('emulate'):
+        command = get_command()
+        if not command:
+            print('The config does not exists or empty! Run --setup command')
+        else:
+            detect_gamepad()
+            os.system('sudo ' + command.format(evdev_filename))
+
+    if args.get('setup'):
+        command = generate_command()
+        save_command(command)
+
+        print('The command is saved to ~/.config/xbox-emu.cfg')
